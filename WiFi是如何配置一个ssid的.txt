@@ -1,0 +1,208 @@
+【WiFi是如何配置一个ssid的 --Day7】
+另外一个例子：// 获取所有网卡信息，参考源代码rtnetlink
+struct {
+		struct nlmsghdr nh; // netlink报头
+		struct ifinfomsg ifi;
+}struReq;
+
+struReq.nh.nlmsg_len = NLMSG_LENGTH(sizeof(struReq));
+struReq.nh.nlmsg_type = RTM_GETLINK;	// 对应 iw创建ap interface的 state->nl80211_id （nlmsg_type）
+										// 这里netlink头的nlmsg_type对应大多数向内核request的信息
+struReq.nh.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
+struReq.ifi.ifi_family = AF_UNSPEC;
+memset(&struAddr, 0, sizeof(struAddr));
+...
+if(sendto(nSocket, &struReq, struReq.nh.nlmsg_len, 0, (struct sockaddr *)&struAddr, sizeof(struAddr)) < 0)
+...
+
+sendto函数原型：
+int sendto (socket s , const void * msg, int len, unsigned int flags, const struct sockaddr * to , int tolen );
+第二个参数是自定义类型，对应于上文iw中sendmsg(...)中的msg数据
+
+【WiFi是如何配置一个ssid的 --Day6】
+netlink自下而上应该是先有协议再有libnl,libnl-genl,libnl-idiag,libnl-nf,libnl-route等API库
+
+所以从socket(AF_NETLINK, type,protol)来看，AF_NETLINK的协议簇有
+#define NETLINK_ROUTE		0	/* Routing/device hook				*/
+#define NETLINK_UNUSED		1	/* Unused number				*/
+#define NETLINK_USERSOCK	2	/* Reserved for user mode socket protocols 	*/
+#define NETLINK_FIREWALL	3	/* Firewalling hook				*/
+#define NETLINK_INET_DIAG	4	/* INET socket monitoring			*/
+#define NETLINK_NFLOG		5	/* netfilter/iptables ULOG */
+#define NETLINK_XFRM		6	/* ipsec */
+#define NETLINK_SELINUX		7	/* SELinux event notifications */
+#define NETLINK_ISCSI		8	/* Open-iSCSI */
+#define NETLINK_AUDIT		9	/* auditing */
+#define NETLINK_FIB_LOOKUP	10	
+#define NETLINK_CONNECTOR	11
+#define NETLINK_NETFILTER	12	/* netfilter subsystem */
+#define NETLINK_IP6_FW		13
+#define NETLINK_DNRTMSG		14	/* DECnet routing messages */
+#define NETLINK_KOBJECT_UEVENT	15	/* Kernel messages to userspace */
+#define NETLINK_GENERIC		16
+/* leave room for NETLINK_DM (DM Events) */
+#define NETLINK_SCSITRANSPORT	18	/* SCSI Transports */
+#define NETLINK_ECRYPTFS	19
+#define NETLINK_RDMA		20
+
+其次，
+libnl-genl用到NETLINK_GENERIC协议，控制器的 API，协议簇（family）和命令的注册
+libnl-idiag用到NETLINK_INET_DIAG，TCP套接字监控
+libnl-nf用到NETLINK_NETFILTER，连接追踪、记录日志、排队（queueing）
+libnl-route用到NETLINK_ROUTE，地址、链路、邻居节点、路由、流量控制、邻居节点表、……
+
+iw:	//这里是创建一个ap网络的netlink实例，参考源代码在iw-5.0.1中
+	nl_socket_alloc 
+	genl_connect	// socket(AF_NETLINK, SOCK_RAW, NETLINK_GENERIC);
+	state->nl80211_id = genl_ctrl_resolve	// 用于将当前协议簇转成内核分配的协议簇ID
+
+	nlmsg_alloc
+	genlmsg_put(msg, 0, 0, state->nl80211_id, 0, cmd->nl_msg_flags, cmd->cmd, 0); // 填充netlink报头，(struct nlmsghdr *) msg->nm_nlh;
+	NLA_PUT_U32(msg, NL80211_ATTR_WIPHY, devidx);
+	NLA_PUT_STRING(msg, NL80211_ATTR_IFNAME, name);
+	NLA_PUT_U32(msg, NL80211_ATTR_IFTYPE, type);	// 添加一个phy interface（SSID） 需要的三个参数
+	
+	err = nl_send_auto_complete(state->nl_sock, msg); // sendmsg(...);
+	
+	nl_recvmsgs(state->nl_sock, cb); //获取内核返回的消息
+
+
+【WiFi是如何配置一个ssid的 --Day5】
+阅读iw的代码时，第一层注意到的就是定义了
+SECTION(interface);
+	COMMAND(interface, add, ...)
+	...
+SECTION(ap);
+	COMMAND(ap, start, ...)
+	...
+SECTION(scan);
+	COMMAND(scan, dump, ...)
+	...
+SECTION(set);
+	COMMAND(set, txpower, ...)
+	COMMAND(set, type, ...)
+	...
+SECTION(get);
+	COMMAND(get, mesh_param, ...)
+	...
+
+这样一系列可以使用的命令行；
+
+第二就是开篇使用libnl，libnl-genl库初始化的一个netlink socket，
+看到这里，我就上网搜索了下关于netlink的知识，得到一本书
+Linux Kernel Networking Implementation and Theory(中译版：精通Linux内核网络).
+
+第二章里介绍了下在用户空间创建netlink soket 和 内核空间创建netlink socket
+-- 即使能用系统调用socket()来创建，但还是推荐使用libnl,libnl-genl。
+举了两个例子，用户空间的创建是用的iw，内核空间是iproute2应用包里的ss命令(与之对应的是
+net-tools里的netstat，前者应用包采用netlink实现，后者基于IOCTRL);
+很可惜，作者一个完整的代码都没交代出来，粗略的提到了几个关键函数。
+
+那么提到iw就不能不提到nl80211了，
+第十二章里把无线子系统拎出来说了下，
+
+	iw		wireless-tool(iwconfig,iwlist)
+	||				||
+  nl80211		   wext
+-------------------------------
+		  cfg80211
+			scan()
+			auth()
+			connect()
+			...
+-------------------------------
+		  mac80211
+			const strcut ieee80211_ops*
+				start()
+				stop()
+				...
+===============================
+	   wireless driver
+
+iw这一支采用netlink，wireless-tools采用ioctrl
+cfg80211向iw提供一些方法
+mac80211实现一个包含各种callback的结构给驱动回调
+
+跟iw沾上关系的就这些，书写粗了点。
+明天继续分析iw代码
+
+
+【WiFi是如何配置一个ssid的 --Day4】
+创建一个ssid的代码大致如下，
+#_enable_qcawificfg80211() {
+	#ifconfig wifi0 up
+	#wlanconfig ath0 create wlandev wifi0 wlanmode ap -cfg80211
+	#iw phy phy0 interface add ath0 type __ap
+	#wpa_cli -g /var/run/hostapd/global raw ADD 'bss_config=ath0:/var/run/hostapd-ath0.conf'
+	#ubus call network.interface.lan add_device '{ "name": "ath0" }'
+	#ifconfig ath0 up
+}
+主要生效的是iw命令，可以直接看到一个ssid的创建和关闭，
+接下来，打算主要看iw代码
+
+【WiFi是如何配置一个ssid的 --Day3】
+这两天还是花时间在定位代码上，shell脚本阅读起来有点难看，
+所以在之前sh -x的基础上再加了一个sh -xv，后者比前者都输出一行调用函数名，前者是直接
+输出结果
+有了执行记录之后，先是和脚本逐行对比，阅读完脚本代码。然后以wifi down关闭ssid，观察其运行记录。
+对wifi脚本进行代码注释调试，关闭一个SSID代码(sh -xv结果)如下：
+
+#_disable_qcawificfg80211() {
+	#+ wpa_cli -g /var/run/hostapd/global raw REMOVE ath0
+	#+ rm /var/run/hostapd-ath0.lock
+	#+ ifconfig ath0 down
+	#+ unbridge ath0
+	#+ iw ath0 del
+	#+ rm /var/run/hostapd_cred_wifi0.bin
+}
+
+粗略的搜索了下，得到结果
+#Linux无线网络管理命令(ip/iw/iwconfig/iwlist/ifconfig/wpa_supplicant)
+
+这里用到的/ifconfig/wpa_supplicant/iw三个命令是为Linux无线网络管理命令，接下来再看看相关文章吧
+
+
+【WiFi是如何配置一个ssid的 --Day2】
+
+今天用gdb跟踪了下，内存里wireless_device数量为0；
+#ubus call network.wireless "$1" "$(json_dump)"
+看来让wifi生效的代码不在这里，还得看
+#_wifi_updown disable
+#_wifi_updown enable
+
+这部分脚本代码，细节过多，还得接着看
+
+
+【WiFi是如何配置一个ssid的 --Day1】
+
+Google这个问题，在openwrt官网上看到的原话，
+
+#启用/重启/关闭无线接口
+#在Openwrt下要启用/重启/关闭无线接口是使用命令“ wifi”来完成的。
+#启动无线接口：不带参数直接在命令行运行wifi命令；
+
+然后从高通ap上tftp出来/目录下的相关文件，在qsdk看到的还是有些的差别的
+
+接着查看wifi脚本，发现直接输入WiFi命令对应脚本的
+#*) ubus call network reload; wifi_updown "enable" "$2";;
+
+这里看到调用了network reload方法，回顾了下之前看过的netifd，这里做的是
+从UCI里重新读一遍，更新内存里的device，interface，有的可能对硬件产生影响
+还要通过ioctl之类的，设置一下操作系统的相关值。
+
+然后开始wifi相关的代码
+
+#_wifi_updown disable
+#ubus_wifi_cmd down
+#ubus_wifi_cmd up
+#_wifi_updown enable
+
+这里_wifi_updown会涉及到很多脚本函数，第一次看的时候，找这些脚本函数费了不少
+功夫，这次选择拷贝高通ap上的/下的相关目录。
+今天参考网上的，直接看ubus_wifi_cmd，
+#ubus call network.wireless "$1" "$(json_dump)"
+这里就比较简单，直接到netifd中看代码了。
+
+目前卡在代码里的一个位置，需要/lib/netifd/wireless目录下的一个脚本，但高通ap
+上没看到有wireless这个目录。
+
